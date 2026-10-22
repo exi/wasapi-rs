@@ -60,7 +60,7 @@ use windows::{
     Win32::System::Threading::{CreateEventA, WaitForSingleObject},
     core::{HRESULT, PCSTR},
 };
-use windows_core::{HSTRING, IUnknown, Interface, PCWSTR, PWSTR, Ref, implement};
+use windows_core::{GUID, HSTRING, IUnknown, Interface, PCWSTR, PWSTR, Ref, implement};
 
 use crate::{
     AudioSessionEvents, DeviceEventCallbacks, EventCallbacks, NotificationClient, WasapiError,
@@ -1232,6 +1232,63 @@ impl AudioClient {
         direction: &Direction,
         stream_mode: &StreamMode,
     ) -> WasapiRes<()> {
+        self.initialize(wavefmt, direction, stream_mode, None)
+    }
+
+    /// Initialize an [AudioClient] as [AudioClient::initialize_client] does,
+    /// but make the stream part of the audio session identified by `session_guid`.
+    ///
+    /// This is the `AudioSessionGuid` parameter of
+    /// [IAudioClient::Initialize()](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize),
+    /// which [AudioClient::initialize_client] leaves as null.
+    /// Streams of one process that are initialized with the same GUID on the same endpoint
+    /// share one session, and the volume mixer shows one entry per session.
+    /// Giving each stream its own GUID gives each stream its own entry,
+    /// for instance to name them separately with [AudioSessionControl::set_display_name].
+    /// A null GUID ([GUID::zeroed()]) means the default session, the same as [AudioClient::initialize_client].
+    ///
+    /// See [Audio Sessions](https://learn.microsoft.com/en-us/windows/win32/coreaudio/audio-sessions).
+    ///
+    /// # Example
+    /// Marked `no_run` because it needs a running audio service, which a build
+    /// machine may not have. The behaviour is covered by the device backed tests.
+    /// ```no_run
+    /// use wasapi::{DeviceEnumerator, Direction, GUID, StreamMode, initialize_mta};
+    ///
+    /// initialize_mta().ok().unwrap();
+    /// let device = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
+    /// let mut client = device.get_iaudioclient()?;
+    /// let format = client.get_mixformat()?;
+    /// let (default_period, _) = client.get_device_period()?;
+    /// let mode = StreamMode::EventsShared {
+    ///     autoconvert: false,
+    ///     buffer_duration_hns: default_period,
+    /// };
+    /// // Any GUID that is stable for this stream, for example a fixed one per stream role.
+    /// let session = GUID::from_u128(0x6d3f_2a71_0c4e_4b8a_9f15_83e2_7a0b_c4d1);
+    /// client.initialize_client_in_session(&format, &Direction::Render, &mode, &session)?;
+    /// client
+    ///     .get_audiosessioncontrol()?
+    ///     .set_display_name("Notifications")?;
+    /// # Ok::<(), wasapi::WasapiError>(())
+    /// ```
+    pub fn initialize_client_in_session(
+        &mut self,
+        wavefmt: &WaveFormat,
+        direction: &Direction,
+        stream_mode: &StreamMode,
+        session_guid: &GUID,
+    ) -> WasapiRes<()> {
+        self.initialize(wavefmt, direction, stream_mode, Some(session_guid))
+    }
+
+    fn initialize(
+        &mut self,
+        wavefmt: &WaveFormat,
+        direction: &Direction,
+        stream_mode: &StreamMode,
+        session_guid: Option<&GUID>,
+    ) -> WasapiRes<()> {
         let sharemode = match stream_mode {
             StreamMode::PollingShared { .. } | StreamMode::EventsShared { .. } => ShareMode::Shared,
             StreamMode::PollingExclusive { .. } | StreamMode::EventsExclusive { .. } => {
@@ -1300,7 +1357,7 @@ impl AudioClient {
                 buffer_duration,
                 period,
                 wavefmt.as_waveformatex_ref(),
-                None,
+                session_guid.map(|guid| guid as *const GUID),
             )?;
         }
         self.direction = *direction;
@@ -1875,6 +1932,42 @@ impl AudioSessionControl {
         let path = unsafe { self.control.GetIconPath()? };
 
         take_pwstr(path)
+    }
+
+    /// Set the display name of this session, the name the volume mixer shows for it.
+    ///
+    /// The name lasts as long as the session, and a session lives beyond the stream that
+    /// created it, so a name set once is still there when the same session is used again.
+    /// Use [AudioClient::initialize_client_in_session] to give separate streams of one
+    /// process separate sessions, and so separate names.
+    /// The name can also be an indirect string like `@%SystemRoot%\System32\shell32.dll,-1`.
+    ///
+    /// Registered session callbacks (see [EventCallbacks::set_displayname_callback])
+    /// receive a null GUID as the event context.
+    ///
+    /// WASAPI docs: [IAudioSessionControl::SetDisplayName](https://learn.microsoft.com/en-us/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessioncontrol-setdisplayname)
+    pub fn set_display_name(&self, name: &str) -> WasapiRes<()> {
+        // Keep the HSTRING in a variable, to make sure it outlives the call.
+        let w_name = HSTRING::from(name);
+        unsafe { self.control.SetDisplayName(&w_name, ptr::null())? };
+        Ok(())
+    }
+
+    /// Set the path of the icon the volume mixer shows for this session.
+    ///
+    /// The path names an icon resource, for example `C:\app.exe,0` or
+    /// `%windir%\system32\shell32.dll,-16`.
+    /// Like the display name, it lasts as long as the session.
+    ///
+    /// Registered session callbacks (see [EventCallbacks::set_iconpath_callback])
+    /// receive a null GUID as the event context.
+    ///
+    /// WASAPI docs: [IAudioSessionControl::SetIconPath](https://learn.microsoft.com/en-us/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessioncontrol-seticonpath)
+    pub fn set_icon_path(&self, path: &str) -> WasapiRes<()> {
+        // Keep the HSTRING in a variable, to make sure it outlives the call.
+        let w_path = HSTRING::from(path);
+        unsafe { self.control.SetIconPath(&w_path, ptr::null())? };
+        Ok(())
     }
 
     /// Get the identifier of the audio session.
