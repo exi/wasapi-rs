@@ -364,7 +364,7 @@ fn open_in_session(fx: &support::Fixture, session: &GUID) -> AudioClient {
     )
     .unwrap();
     client
-        .initialize_client_in_session(&format, &Direction::Render, &mode, session)
+        .initialize_client(&format, &Direction::Render, &mode, Some(*session))
         .unwrap();
     client
 }

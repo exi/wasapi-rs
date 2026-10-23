@@ -803,7 +803,8 @@ impl AudioClient {
     /// audio_client.initialize_client(
     ///     &desired_format,
     ///     &Direction::Capture,
-    ///     &mode
+    ///     &mode,
+    ///     None,
     /// ).unwrap();
     /// ```
     pub fn new_application_loopback_client(process_id: u32, include_tree: bool) -> WasapiRes<Self> {
@@ -935,7 +936,7 @@ impl AudioClient {
     ///     autoconvert: true,
     ///     buffer_duration_hns: default_period,
     /// };
-    /// audio_client.initialize_client(&format, &Direction::Render, &mode).unwrap();
+    /// audio_client.initialize_client(&format, &Direction::Render, &mode, None).unwrap();
     /// ```
     pub fn from_iaudioclient(client: IAudioClient, direction: Direction) -> Self {
         AudioClient {
@@ -1226,27 +1227,16 @@ impl AudioClient {
     ///   - The thread processes the data, and then goes to sleep, for example by calling [std::thread::sleep()].
     ///   - This mode is less efficient and is more prone to glitches when running at low latency.
     ///   - In exclusive mode, it supports more devices, and does not have the stuttering issue with USB audio devices.
-    pub fn initialize_client(
-        &mut self,
-        wavefmt: &WaveFormat,
-        direction: &Direction,
-        stream_mode: &StreamMode,
-    ) -> WasapiRes<()> {
-        self.initialize(wavefmt, direction, stream_mode, None)
-    }
-
-    /// Initialize an [AudioClient] as [AudioClient::initialize_client] does,
-    /// but make the stream part of the audio session identified by `session_guid`.
     ///
-    /// This is the `AudioSessionGuid` parameter of
-    /// [IAudioClient::Initialize()](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize),
-    /// which [AudioClient::initialize_client] leaves as null.
+    /// ### Audio session
+    /// `session_guid` is the `AudioSessionGuid` parameter of
+    /// [IAudioClient::Initialize()](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize).
+    /// `None` puts the stream in the default session of the process, which is what most callers want.
     /// Streams of one process that are initialized with the same GUID on the same endpoint
     /// share one session, and the volume mixer shows one entry per session.
     /// Giving each stream its own GUID gives each stream its own entry,
     /// for instance to name them separately with [AudioSessionControl::set_display_name].
-    /// A null GUID ([GUID::zeroed()]) means the default session, the same as [AudioClient::initialize_client].
-    ///
+    /// `Some(GUID::zeroed())` is the same as `None`.
     /// See [Audio Sessions](https://learn.microsoft.com/en-us/windows/win32/coreaudio/audio-sessions).
     ///
     /// # Example
@@ -1266,28 +1256,18 @@ impl AudioClient {
     /// };
     /// // Any GUID that is stable for this stream, for example a fixed one per stream role.
     /// let session = GUID::from_u128(0x6d3f_2a71_0c4e_4b8a_9f15_83e2_7a0b_c4d1);
-    /// client.initialize_client_in_session(&format, &Direction::Render, &mode, &session)?;
+    /// client.initialize_client(&format, &Direction::Render, &mode, Some(session), None)?;
     /// client
     ///     .get_audiosessioncontrol()?
     ///     .set_display_name("Notifications")?;
     /// # Ok::<(), wasapi::WasapiError>(())
     /// ```
-    pub fn initialize_client_in_session(
+    pub fn initialize_client(
         &mut self,
         wavefmt: &WaveFormat,
         direction: &Direction,
         stream_mode: &StreamMode,
-        session_guid: &GUID,
-    ) -> WasapiRes<()> {
-        self.initialize(wavefmt, direction, stream_mode, Some(session_guid))
-    }
-
-    fn initialize(
-        &mut self,
-        wavefmt: &WaveFormat,
-        direction: &Direction,
-        stream_mode: &StreamMode,
-        session_guid: Option<&GUID>,
+        session_guid: Option<GUID>,
     ) -> WasapiRes<()> {
         let sharemode = match stream_mode {
             StreamMode::PollingShared { .. } | StreamMode::EventsShared { .. } => ShareMode::Shared,
@@ -1357,7 +1337,7 @@ impl AudioClient {
                 buffer_duration,
                 period,
                 wavefmt.as_waveformatex_ref(),
-                session_guid.map(|guid| guid as *const GUID),
+                session_guid.as_ref().map(|guid| guid as *const GUID),
             )?;
         }
         self.direction = *direction;
@@ -1938,7 +1918,7 @@ impl AudioSessionControl {
     ///
     /// The name lasts as long as the session, and a session lives beyond the stream that
     /// created it, so a name set once is still there when the same session is used again.
-    /// Use [AudioClient::initialize_client_in_session] to give separate streams of one
+    /// Pass a session GUID to [AudioClient::initialize_client] to give separate streams of one
     /// process separate sessions, and so separate names.
     /// The name can also be an indirect string like `@%SystemRoot%\System32\shell32.dll,-1`.
     ///

@@ -32,7 +32,7 @@ fn play_sine(freq: f64, session: GUID, name: &str) -> Result<(), WasapiError> {
         autoconvert: true,
         buffer_duration_hns: def_time,
     };
-    audio_client.initialize_client_in_session(&format, &Direction::Render, &mode, &session)?;
+    audio_client.initialize_client(&format, &Direction::Render, &mode, Some(session))?;
     audio_client
         .get_audiosessioncontrol()?
         .set_display_name(name)?;
